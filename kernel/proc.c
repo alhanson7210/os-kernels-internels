@@ -8,12 +8,25 @@
 #include "file.h"
 #include "proc.h"
 #include "defs.h"
+#include "resume_header.h"
+
+#define ROOT 0
 
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
-
 struct proc *initproc;
+
+struct container containers[NCONTAINERS]; //array of containers
+struct container *active_container; //active container running
+static int active_idx; //supposed to be used for switching like the console
+static int creation_quantum; //creation quantum(tracker) for containers for cstart
+/** Note:
+=> container(zero)- C('Q')
+=> container(one)- C('W')
+=> container(two)- C('E')
+=> container(three)- C('R')
+*/
 
 int nextpid = 1;
 struct spinlock pid_lock;
@@ -23,24 +36,98 @@ static void wakeup1(struct proc *chan);
 
 extern char trampoline[]; // trampoline.S
 
+struct container* 
+rootcontainer(void)
+{
+  return &containers[ROOT];
+}
+
+struct container* 
+cstartcontainer(void)
+{
+  return &containers[creation_quantum];
+}
+
+struct container*
+mycontainer()
+{
+  struct proc *p;
+  if (creation_quantum == 0) return &containers[ROOT];
+  p = myproc();
+  return p? p->container : &containers[ROOT];
+}
+
+void
+containerinit(void)
+{
+  struct container *c;
+  //Set and access the active container
+  active_idx = ROOT;
+  creation_quantum = ROOT;
+  //initialize
+  for(c = containers; c < &containers[NCONTAINERS]; c++)
+  {
+    initlock(&c->lock, "container");
+    c->state = c != containers? FREE : STARTED;
+    c->proc_count = 0;
+    c->mem_usage = 0;
+    c->disk_usage = 0;
+    c->proc_limit = NPROC;
+    c->disk_limit = c != containers? CDISKDEFAULT : FSSIZE; // 4th of disk size
+    c->mem_limit = c != containers? CMEMPGS : (TOTALPAGES); /*TOTALPAGES CMEMLIMIT/ *DEFAULTPGS * PGSIZE CMEMDEFAULT CMEMLIMIT*/  // 16th of memory
+    c->cpu_tokens = 0;
+    c->scheduler_tokens = 0;
+    c->root_access = c != containers? 0 : 1;
+    c->cidx = 0;
+    c->current_pid = 0;
+    c->next_pid = 0;
+    c->vc_name[0] = 0;
+    c->rootpath[0] = 0;
+    if (c != containers)
+      c->name[0] = 0;
+    else
+      safestrcpy(c->name, "root", CNAME);
+  }
+  //set root
+  active_container = cstartcontainer();
+  active_container->rootdir = namei("/");
+  active_container->scheduler_tokens++;
+  safestrcpy(active_container->rootpath, "/", MAXPATH);
+}
+
 void
 procinit(void)
 {
   struct proc *p;
-  
+  //Set process space
   initlock(&pid_lock, "nextpid");
-  for(p = proc; p < &proc[NPROC]; p++) {
-      initlock(&p->lock, "proc");
-
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+  for(p = proc; p < &proc[NPROC]; p++)
+  {
+    // Initialize process lock
+    initlock(&p->lock, "proc");
+    // Allocate a page for the process's kernel stack.
+    // Map it high in memory, followed by an invalid
+    // guard page.
+    char *pa = kalloc();
+    if(pa == 0)
+      panic("kalloc");
+    uint64 va = KSTACK((int) (p - proc));
+    kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+    p->kstack = va;
+    p->cpu_tokens = 0;
+    p->container = 0;
+    p->pagetable = 0;
+    p->sz = 0;
+    p->pid = 0;
+    p->parent = 0;
+    p->name[0] = 0;
+    p->chan = 0;
+    p->killed = 0;
+    p->xstate = 0;
+    p->state = UNUSED;
+    p->tracing = 0;
+    p->assigned = 0;
+    p->cpu_tokens = 0;
   }
   kvminithart();
 }
@@ -94,6 +181,8 @@ static struct proc*
 allocproc(void)
 {
   struct proc *p;
+  //struct proc *cp;
+  struct container *c;
 
   for(p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
@@ -106,22 +195,42 @@ allocproc(void)
   return 0;
 
 found:
-  p->pid = allocpid();
+  c = mycontainer();
+  acquire(&c->lock);
+  if(!c->root_access && c->mem_usage + 5 > c->mem_limit)
+  {
+    release(&c->lock);
+    return 0;
+  }
+  release(&c->lock);
 
+  p->pid = allocpid();
   // Allocate a trapframe page.
   if((p->tf = (struct trapframe *)kalloc()) == 0){
+    kfree(p->tf);
     release(&p->lock);
     return 0;
   }
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
-
+  
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof p->context);
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  //this place from lecture is recommended for initialization
+  //mark: set tracing //since fork calls allocproc
+  p->tracing = 0; 
+  p->container = c;
+  p->assigned = 1;
+  p->cpu_tokens = 0;
+  //increase proc count
+  acquire(&c->lock);
+  c->proc_count++;
+  release(&c->lock);
 
   return p;
 }
@@ -132,11 +241,26 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  struct proc *mp;
+  struct container *c;
+  
+  mp = myproc();
+  c = mp->container;
+  mp->container = p->container;
+
+  acquire(&p->container->lock);
+  if (p->container->proc_count > 0) p->container->proc_count--;
+  release(&p->container->lock);
+
   if(p->tf)
     kfree((void*)p->tf);
   p->tf = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+
+  mp->container = c;
+  p->container = 0;
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -146,6 +270,9 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->tracing = 0;
+  p->assigned = 0;
+  p->cpu_tokens = 0;
 }
 
 // Create a page table for a given process,
@@ -157,7 +284,10 @@ proc_pagetable(struct proc *p)
 
   // An empty page table.
   pagetable = uvmcreate();
-
+  if(pagetable == 0) {
+    printf("proc_pagetable failed to allocate\n");
+    return 0;
+  }
   // map the trampoline code (for system call return)
   // at the highest user virtual address.
   // only the supervisor uses it, on the way
@@ -203,7 +333,7 @@ userinit(void)
 
   p = allocproc();
   initproc = p;
-  
+
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
@@ -217,6 +347,7 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  creation_quantum++;
 
   release(&p->lock);
 }
@@ -249,7 +380,16 @@ fork(void)
   int i, pid;
   struct proc *np;
   struct proc *p = myproc();
+  struct container *c;
 
+  c = p->container;
+  acquire(&c->lock);
+  if (!c->root_access && (c->mem_usage + (int)(p->sz/PGSIZE) > c->mem_limit || c->proc_count + 1 > c->proc_limit))
+  {
+    release(&c->lock);
+    return -1;
+  }
+  release(&c->lock);
   // Allocate process.
   if((np = allocproc()) == 0){
     return -1;
@@ -261,6 +401,7 @@ fork(void)
     release(&np->lock);
     return -1;
   }
+  
   np->sz = p->sz;
 
   np->parent = p;
@@ -408,8 +549,8 @@ wait(uint64 addr)
         if(np->state == ZOMBIE){
           // Found one.
           pid = np->pid;
-          if(addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
-                                  sizeof(np->xstate)) < 0) {
+          if(addr != 0 
+          && copyout(p->pagetable, addr, (char *)&np->xstate, sizeof(np->xstate)) < 0) {
             release(&np->lock);
             release(&p->lock);
             return -1;
@@ -444,48 +585,112 @@ wait(uint64 addr)
 void
 scheduler(void)
 {
-  struct proc *p;
-  struct cpu *c = mycpu();
+  int start;
+  uint tokens;
+  struct proc* p;
+  struct cpu* c = mycpu();
+  struct container* current, *search, *smallest;
   
   c->proc = 0;
   for(;;){
     // Avoid deadlock by giving devices a chance to interrupt.
     intr_on();
-
     // Run the for loop with interrupts off to avoid
     // a race between an interrupt and WFI, which would
     // cause a lost wakeup.
-    intr_off();
-
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
+    for(p = proc; p < &proc[NPROC]; p++)
+    {
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
+      smallest = containers;
+      for (search = containers; search < &containers[NCONTAINERS]; search++)
+      {
+        acquire(&search->lock);
+        if(search->state != STARTED)
+        {
+          release(&search->lock);
+          continue;
+        }
+        tokens = search->scheduler_tokens;
+        release(&search->lock);
+        if(smallest->scheduler_tokens > tokens && tokens != 0) smallest = search;
+      }
+      current = smallest;
+      if (p->container == current && p->state == RUNNABLE && current->state == STARTED)
+      {
+        current->scheduler_tokens++;
         p->state = RUNNING;
         c->proc = p;
+        start = ticks;
         swtch(&c->scheduler, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
         c->proc = 0;
-
-        found = 1;
+        current->scheduler_tokens += ticks - start;
+        current->current_pid = p->pid;
       }
-
-      // ensure that release() doesn't enable interrupts.
-      // again to avoid a race between interrupt and WFI.
       c->intena = 0;
-
       release(&p->lock);
-    }
-    if(found == 0){
-      asm volatile("wfi");
     }
   }
 }
+
+/* SCHEDULING CODE
+ * general scheduler code with containers
+ for (cn = containers; cn < &containers[NCONTAINERS]; cn++)
+    {
+      acquire(&cn->lock);
+      if (cn->state != STARTED)
+      {
+        release(&cn->lock);
+        continue;
+      }
+      release(&cn->lock);
+      for(p = proc; p < &proc[NPROC]; p++)
+      {
+        acquire(&p->lock);
+        if (p->container == cn && p->state == RUNNABLE && cn->state == STARTED)
+        {
+          p->state = RUNNING;
+          c->proc = p;
+          swtch(&c->scheduler, &p->context);
+          c->proc = 0;
+        }
+        c->intena = 0;
+        release(&p->lock);
+      }
+    }
+ * general scheduler code with containers
+ *
+ * OLD SCHEDULER CODE
+    // intr_off();
+    // int found = 0;
+  //   for(p = proc; p < &proc[NPROC]; p++) {
+  //     acquire(&p->lock);
+  //     if(p->state == RUNNABLE) {
+  //       // Switch to chosen process.  It is the process's job
+  //       // to release its lock and then reacquire it
+  //       // before jumping back to us.
+  //       p->state = RUNNING;
+  //       c->proc = p;
+  //       swtch(&c->scheduler, &p->context);
+
+  //       // Process is done running for now.
+  //       // It should have changed its p->state before coming back.
+  //       c->proc = 0;
+
+  //       found = 1;
+  //     }
+
+  //     // ensure that release() doesn't enable interrupts.
+  //     // again to avoid a race between interrupt and WFI.
+  //     c->intena = 0;
+
+  //     release(&p->lock);
+  //   }
+  //   // if(found == 0){
+  //   //   asm volatile("wfi");
+  //   // }
+ * OLD SCHEDULER CODE
+ */
+
 
 // Switch to scheduler.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
@@ -615,12 +820,14 @@ int
 kill(int pid)
 {
   struct proc *p;
+  struct proc *mp;
 
+  mp = myproc();
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
-    if(p->pid == pid){
+    if(p->pid == pid && (mp->container == p->container || mp->container->root_access)){
       p->killed = 1;
-      if(p->state == SLEEPING){
+      if(p->state == SLEEPING || p->state == SUSPENDED){
         // Wake process from sleep().
         p->state = RUNNABLE;
       }
@@ -673,20 +880,361 @@ procdump(void)
   [SLEEPING]  "sleep ",
   [RUNNABLE]  "runble",
   [RUNNING]   "run   ",
-  [ZOMBIE]    "zombie"
+  [ZOMBIE]    "zombie",
+  [SUSPENDED] "suspended"
   };
-  struct proc *p;
+  
   char *state;
+  struct proc *p;
+  struct proc *mp;
+  struct container *c;
 
+  mp = myproc();
   printf("\n");
-  for(p = proc; p < &proc[NPROC]; p++){
+  printf("PID\tSTATE\tNAME\tCONTAINER\tPROCESS\n");
+  for(p = proc; p < &proc[NPROC]; p++)
+  {
+    acquire(&p->lock);
+    if(p->state == UNUSED || !p->assigned || (mp && !mp->container->root_access && p->container != mp->container))
+    {
+      release(&p->lock);
+      continue;
+    }
+    release(&p->lock);
+    if(p->state >= 0 && p->state < NELEM(states) && states[p->state])
+      state = states[p->state];
+    else
+      state = "???";
+    printf("%d\t%s\t%s\t%s\t\t%d\n", p->pid, state, p->name, p->container->name, p->container->proc_count);
+  }
+  printf("\nNAME\tMEM(KB)\tDISK\tPROCS\tTOKENS\n");
+  for (c = containers; c < &containers[NCONTAINERS]; c++)
+  {
+    acquire(&c->lock);
+    if (c->state == STARTED)
+    {
+      printf("%s\t%d\t%d\t%d\t%d\n", 
+        c->name,
+        (c->mem_usage * PGSIZE) / KILOMEM, 
+        c->disk_usage * KILOMEM,
+        c->proc_count,
+        c->scheduler_tokens);
+      c->cpu_tokens = 1;
+    }
+    release(&c->lock);
+  }
+}
+
+void
+psinfo(void)
+{
+  // int found;
+  static char *states[] = {
+	  [UNUSED]    "unused",
+	  [SLEEPING]  "sleep ",
+	  [RUNNABLE]  "runble",
+	  [RUNNING]   "run   ",
+	  [ZOMBIE]    "zombie",
+	  [SUSPENDED] "suspended"
+  };
+
+	struct proc *p; // process from process list
+  struct proc *mp; // check myproc to make sure the containers are the same
+
+  mp = myproc();
+  printf("PID\tMEM\tNAME\tSTATE\tCONTAINER\n");
+	for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state == UNUSED || !p->assigned || (!mp->container->root_access && p->container != mp->container))
+    {
+      release(&p->lock);
+      continue;
+    }
+    if (mp->container->root_access || p->container == mp->container)
+    {
+      printf("%d\t%dK\t%s\t%s\t%s\n", 
+        p->pid, 
+        (int)(p->sz / KILOMEM), 
+        p->name,
+        states[p->state],
+        p->container->name
+      );
+    }
+    release(&p->lock);
+	}
+}
+/*
+ * old ps code that broke whenever the structure was accessed on the kernel side
+ * maybe the structure needed everything to be zeroed out but I'm not going to
+ * waste anymore time on trying to fix or figure it out
+*/
+// printf("found a process\n");
+//we can add the information to the 
+// printf("acquired lock\n");
+// pt->pinfo_t[pt->count].pid = p->pid;
+// printf("got p pid\n");
+// pt->pinfo_t[pt->count].mem = (int) (p->sz / KILOMEM);
+// printf("saved p mem\n");
+// pt->pinfo_t[pt->count].state = p->state;
+// printf("state copy \n");
+// safestrcpy(pt->pinfo_t[pt->count].name, p->name, strlen(p->name) + 1);
+// printf("p name copy\n");
+// safestrcpy(pt->pinfo_t[pt->count].cname, p->container->name, strlen(p->container->name));
+// printf("cname copy\n");
+// pt->count++;
+// printf("pt count\n");
+// printf("release\n");
+
+int	
+suspend(int pid, struct file *f)
+{
+	pagetable_t oldpt;
+	struct proc *p; // process from process list
+	struct proc *mp; //
+	struct resumehdr rhdr; //resume header instead of elf header
+  mp = myproc();
+	printf("Finding suspended process:\n");
+	for(p = proc; p < &proc[NPROC]; p++)
+	{
+     	if(!p->assigned || p->pid != pid || (!p->container->root_access && p->container != mp->container))
+     		continue;
+		  //suspend process
+     	acquire(&p -> lock);
+   		printf("Found process and changing it to suspended now.\n");
+   		p -> state = SUSPENDED;
+   		//release successfully
+   		release(&p -> lock);
+   		//copy info  to header
+   		rhdr.memory_size = p->sz;
+   		rhdr.code_size = p->sz - 2*PGSIZE;
+   		rhdr.stack_size = PGSIZE;
+   		rhdr.tracing = p->tracing;
+   		safestrcpy(rhdr.name, p->name, strlen(p->name) + 1);
+   		//copy proc info into file
+   		oldpt = mp->pagetable;
+   		mp->pagetable = p->pagetable;
+   		//write from kernel
+    	filewritefromkernelspace(f, (uint64) &rhdr, sizeof(rhdr)); // resume header
+    	filewritefromkernelspace(f, (uint64) p->tf, sizeof(struct trapframe)); // trapframe
+    	//write normally
+    	filewrite(f, (uint64) 0, rhdr.code_size); // code + data
+    	filewrite(f, (uint64) (rhdr.code_size + PGSIZE), PGSIZE); // stack info
+    	//swap back in the old pagetable
+   		mp->pagetable = oldpt;
+   		return 1;
+	}
+	printf("Did not find process needed to be suspended.\n");
+	return -1;
+}
+
+struct container*
+createcontainer(void)
+{
+  struct container *c;
+  for(c = &containers[1]; c < &containers[NCONTAINERS]; c++) {
+    acquire(&c->lock);
+    if(c->state == FREE || c->state == CREATED || c->state == STOPPED) {
+      // Reserve the container.
+      c->state = STARTED;
+      release(&c->lock);
+      return c;
+    }
+    release(&c->lock);
+  }
+  return 0;
+}
+
+struct container*
+find(char *cname)
+{
+  struct container *c;
+  for(c = containers; c < &containers[NCONTAINERS]; c++) {
+    acquire(&c->lock);
+    if(strncmp(c->name, cname, sizeof(c->name)) == 0) {
+      release(&c->lock);
+      return c;
+    }
+    release(&c->lock);
+  }
+  return 0;
+}
+
+int cinfo(void)
+{
+  //process states
+  static char *states[] = {
+	  [UNUSED]    "unused",
+	  [SLEEPING]  "sleep ",
+	  [RUNNABLE]  "runble",
+	  [RUNNING]   "run   ",
+	  [ZOMBIE]    "zombie",
+	  [SUSPENDED] "suspended"
+  };
+  //variables
+  uint64 total;
+  uint tokens;
+  char *state;
+  struct proc *p;
+  struct container* c;
+  total = 0;
+  tokens = 0;
+  for(p = proc; p < &proc[NPROC]; p++)
+  {
+    if(p->state == UNUSED || !p->assigned)
+      continue;
+    total += p->cpu_tokens;
+    p->container->cpu_tokens += p->cpu_tokens;
+  }
+  printf("Ticks: %d\nTotal Tokens: %d\n", ticks, total);
+  printf("[Process Statistics]\n");
+  printf("\nPID\tCPU %%\tTOKENS\tSTATE\tNAME\tCONTAINER\n");
+  for(p = proc; p < &proc[NPROC]; p++)
+  {
     if(p->state == UNUSED)
       continue;
     if(p->state >= 0 && p->state < NELEM(states) && states[p->state])
       state = states[p->state];
     else
       state = "???";
-    printf("%d %s %s", p->pid, state, p->name);
-    printf("\n");
+    c = p->container;
+    tokens = p->cpu_tokens;
+    printf("%d\t%d\t%d\t%s\t%s\t'%s'\t\n", p->pid, (tokens*100)/total, tokens, state, p->name, c->name);
   }
+  printf("[Process Statistics]\n");
+  printf("\n[Container Statistics]\n");
+  printf("NAME\tMEM(KB)\tDISK\tPROCS\tCPU %%\tTOKENS\n");
+  for (c = containers; c < &containers[NCONTAINERS]; c++)
+  {
+    acquire(&c->lock);
+    if (c->state == STARTED)
+    {
+      printf("%s\t%d\t%d\t%d\t%d%%\t%d\n", 
+        c->name, 
+        (c->mem_usage * PGSIZE)/KILOMEM,
+        c->disk_usage * KILOMEM,
+        c->proc_count,
+        (c->cpu_tokens * 100)/total,
+        c->cpu_tokens
+      );
+      c->cpu_tokens = 1;
+    }
+    release(&c->lock);
+  }
+  printf("[Container Statistics]\n");
+  return 1;
+}
+
+int cpause(char* cname)
+{
+  struct container *c = find(cname);
+  if (!c) return -1;
+  acquire(&c->lock);
+  c->state = PAUSED;
+  release(&c->lock);
+  return 1;
+}
+
+int cresume(char* cname)
+{
+  struct container *c = find(cname);
+  if (!c || c->state != PAUSED) return -1;
+  acquire(&c->lock);
+  c->state = STARTED;
+  release(&c->lock);
+  return 1;
+}
+
+int cstart(int vcfd, char* vcname, char* cname, char* rootpath, char* program)
+{
+  struct inode *ip;
+  if ((ip = namei(rootpath)) < 0)
+  {
+    printf("failed to get the rootpath\n");
+    return -1;
+  }
+  struct container *c;
+  if (!(c = createcontainer()))
+  { // c -> state should be STARTED after this method call
+    printf("failed to create a container\n");
+    return -1;
+  }
+  //pages for sh program
+  //5 pages for every proc
+  //4 pages: where 2 pages are code + data 
+  // and the other 2 pages are for the stack
+  int pages = 9; 
+  acquire(&c->lock);
+  strncpy(c->name, cname, CNAME);
+  strncpy(c->vc_name, vcname, CNAME);
+  safestrcpy(c->rootpath, rootpath, MAXPATH);
+  c->proc_count++;
+  c->mem_usage += pages;
+  c->scheduler_tokens++;
+  release(&c->lock);
+  //update the parent container and stats
+  struct proc *p;
+  p = myproc();
+  p->container = c;
+  strncpy(p->name, program, 16);
+  acquire(&p->parent->container->lock); /*parent->*/
+  p->parent->container->proc_count--; /*parent->*/
+  p->parent->container->mem_usage -= pages; /*parent->*/
+  release(&p->parent->container->lock); /*parent->*/
+  //correct file pointers
+  begin_op(ROOTDEV);
+  c->rootdir = idup(ip);
+  iput(p->cwd);
+  end_op(ROOTDEV);
+  p->cwd = ip;
+  //return success
+  return 1;
+}
+
+int cstop(char* cname)
+{
+  struct proc *p;
+  struct container *c = find(cname);
+  if (!c) return -1;
+  for(p = proc; p < &proc[NPROC]; p++)
+  {
+    if(p->container == c)
+    {
+      kill(p->pid);
+      yield();
+    }
+  }
+  acquire(&c->lock);
+  *c->name = '\0';
+  *c->vc_name = '\0';
+  *c->rootpath = '\0';
+  c->proc_count = 0;
+  c->state = STOPPED;
+  c->rootdir = 0;
+  release(&c->lock);
+  return 1;
+}
+
+void
+freememory(void)
+{
+  struct proc* p = myproc();
+  struct container* c;
+  uint mem_usage = 0, mem_limit = 0;
+  if (p->container->root_access)
+  {
+    for(c = containers; c < &containers[NCONTAINERS]; c++)
+    {
+      acquire(&c->lock);
+      mem_usage += c->mem_usage;
+      release(&c->lock);
+    }
+    mem_limit += PHYSTOP / PGSIZE;
+  }
+  else
+  {
+    mem_usage = p->container->mem_usage;
+    mem_limit = p->container->mem_limit;
+  }
+  printf("Used memory:  '%d' Pages\n", mem_usage);
+  printf("Free memory:  '%d' Pages\n", mem_limit);
 }

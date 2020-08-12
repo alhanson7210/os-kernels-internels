@@ -24,3 +24,18 @@
 // System calls for labs
 #define SYS_ntas   22
 #define SYS_nfree  23
+
+// System calls for projects and personal implementation
+#define SYS_strace_off 24
+#define SYS_strace_on 25
+#define SYS_psinfo 26
+#define SYS_suspend 27
+#define SYS_resume 28
+#define SYS_cinfo 29
+#define SYS_cpause 30
+#define SYS_cresume 31
+#define SYS_cstart 32
+#define SYS_cstop 33
+#define SYS_root_access 34
+#define SYS_ticks 35
+#define SYS_freememory 36

@@ -52,6 +52,9 @@ usertrap(void)
   
   // save user program counter.
   p->tf->epc = r_sepc();
+
+  //increase process token
+  p->cpu_tokens++;
   
   if(r_scause() == 8){
     // system call

@@ -80,20 +80,23 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
-enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE, SUSPENDED };
 
 // Per-process state
 struct proc {
   struct spinlock lock;
 
   // p->lock must be held when using these:
+  struct container *container; // Process's Container Space
   enum procstate state;        // Process state
   struct proc *parent;         // Parent process
   void *chan;                  // If non-zero, sleeping on chan
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
-
+  int tracing;                 // flag for strace
+  int assigned;                // Default until process is assigned
+  uint cpu_tokens;             // tokens for the amount cpu used
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
@@ -103,4 +106,64 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+};
+
+enum containerstate { FREE, CREATED, STARTED, PAUSED, STOPPED };
+//container space ~ manage name space isolation, proess isolation, memory space isolation
+struct container {
+  int root_access;
+  int proc_limit;
+  int mem_limit;
+  int disk_limit;
+  int proc_count;
+  int mem_usage;
+  int disk_usage;
+  int current_pid; // the current point in the proc array
+  int cidx; // the index in the proc array to start and search from
+  int next_pid; // these is the next point in the proc array
+  uint cpu_tokens;
+  uint scheduler_tokens;
+  enum containerstate state;
+  char name[CNAME];
+  char vc_name[CNAME];
+  char rootpath[MAXPATH];
+  struct spinlock lock;
+  struct inode *rootdir;
+  uint ticks;
+};
+//Access to containers outside of proc.c
+extern struct container containers[NCONTAINERS];
+
+//process info for ps
+struct pinfo {
+	int pid;
+	int mem;
+	enum procstate state;
+	char name[16];
+  char cname[CNAME];
+  uint ticks; 
+};
+
+//process info table needed for printing out all found pinfo for running processes for ps
+struct ptable {
+	struct pinfo pinfo_t[NPROC];
+	int count;
+};
+
+struct cinfo {
+  int mem_limit;
+  int disk_limit;
+  int proc_limit;
+  int mem_usage;
+  int disk_usage;
+  uint ticks;
+  enum procstate state;
+  char cname[CNAME];
+  char rootpath[MAXPATH];
+  struct pinfo proc[NPROC];
+};
+
+struct ctable {
+  struct cinfo cinfo_t[NPROC];
+  int count;
 };

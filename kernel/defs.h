@@ -8,6 +8,8 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct ptable;
+struct container;
 
 // bio.c
 void            binit(void);
@@ -24,6 +26,7 @@ void            consputc(int);
 
 // exec.c
 int             exec(char*, char**);
+int				      resume(char* filename);
 
 // file.c
 struct file*    filealloc(void);
@@ -33,6 +36,8 @@ void            fileinit(void);
 int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
+int				      filereadfromkernelspace(struct file*, uint64, int n);
+int				      filewritefromkernelspace(struct file*, uint64, int n);
 
 // fs.c
 void            fsinit(int);
@@ -92,7 +97,11 @@ int             kill(int);
 struct cpu*     mycpu(void);
 struct cpu*     getmycpu(void);
 struct proc*    myproc();
+void            containerinit(void);
 void            procinit(void);
+struct container * rootcontainer(void);
+struct container * cstartcontainer(void); 
+struct container * mycontainer(void); 
 void            scheduler(void) __attribute__((noreturn));
 void            sched(void);
 void            setproc(struct proc*);
@@ -104,7 +113,14 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
-
+void            psinfo(void);
+int             cinfo(void);
+int				      suspend(int pid, struct file *f);
+int             cpause(char*);
+int             cresume(char*);
+int             cstart(int, char*, char*, char*, char*);
+int             cstop(char*);
+void            freememory(void);
 // swtch.S
 void            swtch(struct context*, struct context*);
 
@@ -189,9 +205,9 @@ void            virtio_disk_intr(int);
 // extra files for lab alloc
 
 // buddy.c
-void           bd_init(void*,void*);
-void           bd_free(void*);
-void           *bd_malloc(uint64);
+void            bd_init(void*,void*);
+void            bd_free(void*);
+void *          bd_malloc(uint64);
 
 struct list {
   struct list *next;
@@ -199,12 +215,12 @@ struct list {
 };
 
 // list.c
-void lst_init(struct list*);
-void lst_remove(struct list*);
-void lst_push(struct list*, void *);
-void *lst_pop(struct list*);
-void lst_print(struct list*);
-int lst_empty(struct list*);
+void            lst_init(struct list*);
+void            lst_remove(struct list*);
+void            lst_push(struct list*, void *);
+void *          lst_pop(struct list*);
+void            lst_print(struct list*);
+int             lst_empty(struct list*);
 
 // extra files for lab net
 

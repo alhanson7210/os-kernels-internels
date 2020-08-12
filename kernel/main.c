@@ -15,6 +15,7 @@ void
 main()
 {
   if(cpuid() == 0){
+    containerinit();
     consoleinit();
     printfinit();
     printf("\n");
@@ -32,7 +33,7 @@ main()
     iinit();         // inode cache
     fileinit();      // file table
     virtio_disk_init(minor(ROOTDEV)); // emulated hard disk
-    userinit();      // first user process
+    userinit();      // first user process //set up first container
     __sync_synchronize();
     started = 1;
   } else {
@@ -44,6 +45,6 @@ main()
     trapinithart();   // install kernel trap vector
     plicinithart();   // ask PLIC for device interrupts
   }
-
+  
   scheduler();        
 }

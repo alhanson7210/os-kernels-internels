@@ -106,6 +106,19 @@ extern uint64 sys_write(void);
 extern uint64 sys_uptime(void);
 extern uint64 sys_ntas(void);
 extern uint64 sys_nfree(void);
+extern uint64 sys_strace_off(void);
+extern uint64 sys_strace_on(void);
+extern uint64 sys_psinfo(void);
+extern uint64 sys_suspend(void);
+extern uint64 sys_resume(void);
+extern uint64 sys_cinfo(void);
+extern uint64 sys_cpause(void);
+extern uint64 sys_cresume(void);
+extern uint64 sys_cstart(void);
+extern uint64 sys_cstop(void);
+extern uint64 sys_root_access(void);
+extern uint64 sys_ticks(void);
+extern uint64 sys_freememory(void);
 
 static uint64 (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -131,6 +144,19 @@ static uint64 (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 [SYS_ntas]    sys_ntas,
 [SYS_nfree]   sys_nfree,
+[SYS_strace_off] sys_strace_off,
+[SYS_strace_on]  sys_strace_on,
+[SYS_psinfo] sys_psinfo,
+[SYS_suspend] sys_suspend, 
+[SYS_resume] sys_resume,
+[SYS_cinfo] sys_cinfo,
+[SYS_cpause] sys_cpause,
+[SYS_cresume] sys_cpause,
+[SYS_cstart] sys_cstart,
+[SYS_cstop] sys_cstop,
+[SYS_root_access] sys_root_access,
+[SYS_ticks] sys_ticks,
+[SYS_freememory] sys_freememory
 };
 
 void

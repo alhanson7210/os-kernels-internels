@@ -67,14 +67,29 @@ balloc(uint dev)
 {
   int b, bi, m;
   struct buf *bp;
+  struct container *c;
+
+  c = mycontainer();
+  acquire(&c->lock);
+  if (!c->root_access && c->disk_usage + 1 > c->disk_limit)
+  {
+    printf("kernel: container <%s> memory limit reached. Used: <%d> Limit: <%d>", c->name, c->disk_usage, c->disk_limit);
+    release(&c->lock);
+    panic("balloc: Container memory limit reached!\n");
+  }
+  release(&c->lock);
 
   bp = 0;
   for(b = 0; b < sb.size; b += BPB){
     bp = bread(dev, BBLOCK(b, sb));
     for(bi = 0; bi < BPB && b + bi < sb.size; bi++){
       m = 1 << (bi % 8);
-      if((bp->data[bi/8] & m) == 0){  // Is block free?
+      if((bp->data[bi/8] & m) == 0)
+      {  // Is block free?
         bp->data[bi/8] |= m;  // Mark block in use.
+        acquire(&c->lock);
+        c->disk_usage += 1;
+        release(&c->lock);
         log_write(bp);
         brelse(bp);
         bzero(dev, b + bi);
@@ -90,14 +105,22 @@ balloc(uint dev)
 static void
 bfree(int dev, uint b)
 {
-  struct buf *bp;
   int bi, m;
+  struct buf *bp;
+  struct container *c;
 
   bp = bread(dev, BBLOCK(b, sb));
   bi = b % BPB;
   m = 1 << (bi % 8);
+  
   if((bp->data[bi/8] & m) == 0)
     panic("freeing free block");
+
+  c = mycontainer();
+  acquire(&c->lock);
+  if (c->disk_usage > 0) c->disk_usage -= 1;
+  release(&c->lock);
+
   bp->data[bi/8] &= ~m;
   log_write(bp);
   brelse(bp);
@@ -630,11 +653,27 @@ static struct inode*
 namex(char *path, int nameiparent, char *name)
 {
   struct inode *ip, *next;
+  struct container *c;
+  char correctedpath[MAXPATH] = { 0 };
+
+  c = mycontainer();
+
+  if (!c->root_access && strncmp(path, "..", 2) != 0)
+  {
+    int stringlength = strlen(c->rootpath);
+    if (c->rootpath[stringlength-1] != '/') c->rootpath[stringlength-1] = '/';
+    safestrcpy(correctedpath, c->rootpath, MAXPATH);
+    if(*path == '/') path++;
+    safestrcpy(correctedpath + stringlength, path, MAXPATH);
+    path = correctedpath;
+  }
 
   if(*path == '/')
     ip = iget(ROOTDEV, ROOTINO);
   else
     ip = idup(myproc()->cwd);
+
+  if (!c->root_access && strncmp(path, "..", 2) == 0 && c->rootdir->inum == ip->inum) return ip;
 
   while((path = skipelem(path, name)) != 0){
     ilock(ip);
@@ -642,11 +681,18 @@ namex(char *path, int nameiparent, char *name)
       iunlockput(ip);
       return 0;
     }
+
+    if(strncmp(path, "..", 2) == 0 && c->rootdir->inum == ip->inum && *skipelem(path, name) != '\0') {
+      iunlock(ip);
+      return ip;
+    }
+
     if(nameiparent && *path == '\0'){
       // Stop one level early.
       iunlock(ip);
       return ip;
     }
+
     if((next = dirlookup(ip, name, 0)) == 0){
       iunlockput(ip);
       return 0;
@@ -654,6 +700,7 @@ namex(char *path, int nameiparent, char *name)
     iunlockput(ip);
     ip = next;
   }
+
   if(nameiparent){
     iput(ip);
     return 0;

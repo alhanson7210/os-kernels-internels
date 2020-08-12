@@ -28,6 +28,19 @@ int crash(const char*, int);
 int mount(char*, char *);
 int umount(char*);
 int nfree();
+void strace_off(void);
+void strace_on(void);
+int psinfo(void);
+int suspend(int, int);
+int resume(const char*);
+int cinfo(void);
+int cpause(char*);
+int cresume(char*);
+int cstart(int, char*, char*, char*, char*);
+int cstop(char*);
+int root_access(void);
+uint ticks(void);
+void freememory(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

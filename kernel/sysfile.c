@@ -55,13 +55,20 @@ fdalloc(struct file *f)
 uint64
 sys_dup(void)
 {
-  struct file *f;
   int fd;
-
-  if(argfd(0, 0, &f) < 0)
+  struct file *f;
+  struct proc *p;
+  
+  if(argint(0, &fd) < 0 || argfd(0, 0, &f) < 0)
     return -1;
+
+  p = myproc();
+  if (p -> tracing)
+    printf(" [%d] sys_dup(%d)\n", p -> pid, fd);
+
   if((fd=fdalloc(f)) < 0)
     return -1;
+
   filedup(f);
   return fd;
 }
@@ -69,24 +76,35 @@ sys_dup(void)
 uint64
 sys_read(void)
 {
-  struct file *f;
-  int n;
   uint64 p;
+  int n, fd;
+  struct file *f;
+  struct proc *pr;
 
-  if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
+  if(argint(0, &fd) < 0 || argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
+
+  pr = myproc();
+  if (pr -> tracing)
+  	printf(" [%d] sys_read(%d, %p, %d)\n", pr -> pid, fd, p, n);
+
   return fileread(f, p, n);
 }
 
 uint64
 sys_write(void)
 {
-  struct file *f;
-  int n;
   uint64 p;
+  int n, fd;
+  struct file *f;
+  struct proc *pr;
 
-  if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
+  if(argint(0, &fd) < 0 || argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
+
+  pr = myproc();
+  if (pr -> tracing)
+  	printf(" [%d] sys_write(%d, %p, %d)\n", pr -> pid, fd, p, n);
 
   return filewrite(f, p, n);
 }
@@ -96,9 +114,15 @@ sys_close(void)
 {
   int fd;
   struct file *f;
+  struct proc *p;
 
   if(argfd(0, &fd, &f) < 0)
     return -1;
+
+  p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_close(%d)\n", p -> pid, fd);
+
   myproc()->ofile[fd] = 0;
   fileclose(f);
   return 0;
@@ -107,11 +131,17 @@ sys_close(void)
 uint64
 sys_fstat(void)
 {
-  struct file *f;
   uint64 st; // user pointer to struct stat
+  struct file *f;
+  struct proc *p;
 
   if(argfd(0, 0, &f) < 0 || argaddr(1, &st) < 0)
     return -1;
+
+  p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_fstat(%p, %p)\n", p -> pid, f, st);
+
   return filestat(f, st);
 }
 
@@ -119,11 +149,16 @@ sys_fstat(void)
 uint64
 sys_link(void)
 {
-  char name[DIRSIZ], new[MAXPATH], old[MAXPATH];
+  char name[DIRSIZ] = { 0 }, new[MAXPATH] = { 0 }, old[MAXPATH] = { 0 };
   struct inode *dp, *ip;
+  struct proc *p;
 
   if(argstr(0, old, MAXPATH) < 0 || argstr(1, new, MAXPATH) < 0)
     return -1;
+
+  p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_link(\"%s\", \"%s\")\n", p -> pid, old, new);
 
   begin_op(ROOTDEV);
   if((ip = namei(old)) == 0){
@@ -184,13 +219,18 @@ isdirempty(struct inode *dp)
 uint64
 sys_unlink(void)
 {
+  uint off;
+  char name[DIRSIZ] = { 0 }, path[MAXPATH] = { 0 };
   struct inode *ip, *dp;
   struct dirent de;
-  char name[DIRSIZ], path[MAXPATH];
-  uint off;
+  struct proc *p;
 
   if(argstr(0, path, MAXPATH) < 0)
     return -1;
+
+  p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_unlink(\"%s\")\n", p -> pid, path);
 
   begin_op(ROOTDEV);
   if((dp = nameiparent(path, name)) == 0){
@@ -242,7 +282,7 @@ static struct inode*
 create(char *path, short type, short major, short minor)
 {
   struct inode *ip, *dp;
-  char name[DIRSIZ];
+  char name[DIRSIZ] = { 0 }; /* needs to be changed back to { 0 }*/
 
   if((dp = nameiparent(path, name)) == 0)
     return 0;
@@ -286,14 +326,18 @@ create(char *path, short type, short major, short minor)
 uint64
 sys_open(void)
 {
-  char path[MAXPATH];
-  int fd, omode;
+  int fd, omode, n;
+  char path[MAXPATH] = { 0 };
   struct file *f;
   struct inode *ip;
-  int n;
+  struct proc *p;
 
   if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
     return -1;
+
+  p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_open(\"%s\", %d)\n", p -> pid, path, omode);
 
   begin_op(ROOTDEV);
 
@@ -351,14 +395,20 @@ sys_open(void)
 uint64
 sys_mkdir(void)
 {
-  char path[MAXPATH];
+  char path[MAXPATH] = { 0 };
   struct inode *ip;
+  struct proc *p;
 
   begin_op(ROOTDEV);
   if(argstr(0, path, MAXPATH) < 0 || (ip = create(path, T_DIR, 0, 0)) == 0){
     end_op(ROOTDEV);
     return -1;
   }
+
+  p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_mkdir(\"%s\")\n", p -> pid, path);
+
   iunlockput(ip);
   end_op(ROOTDEV);
   return 0;
@@ -367,9 +417,10 @@ sys_mkdir(void)
 uint64
 sys_mknod(void)
 {
-  struct inode *ip;
-  char path[MAXPATH];
   int major, minor;
+  char path[MAXPATH] = { 0 };
+  struct inode *ip;
+  struct proc *p;
 
   begin_op(ROOTDEV);
   if((argstr(0, path, MAXPATH)) < 0 ||
@@ -379,6 +430,11 @@ sys_mknod(void)
     end_op(ROOTDEV);
     return -1;
   }
+
+  p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_mknod(\"%s\", %d, %d)\n", p -> pid, path, major, minor);
+
   iunlockput(ip);
   end_op(ROOTDEV);
   return 0;
@@ -387,15 +443,20 @@ sys_mknod(void)
 uint64
 sys_chdir(void)
 {
-  char path[MAXPATH];
+  char path[MAXPATH] = { 0 };
   struct inode *ip;
-  struct proc *p = myproc();
-  
+  struct proc *p;
+
   begin_op(ROOTDEV);
   if(argstr(0, path, MAXPATH) < 0 || (ip = namei(path)) == 0){
     end_op(ROOTDEV);
     return -1;
   }
+
+  p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_chdir(\"%s\")\n", p -> pid, path);
+
   ilock(ip);
   if(ip->type != T_DIR){
     iunlockput(ip);
@@ -412,13 +473,18 @@ sys_chdir(void)
 uint64
 sys_exec(void)
 {
-  char path[MAXPATH], *argv[MAXARG];
+  char path[MAXPATH] = { 0 }, *argv[MAXARG] = { 0 };
   int i;
   uint64 uargv, uarg;
 
   if(argstr(0, path, MAXPATH) < 0 || argaddr(1, &uargv) < 0){
     return -1;
   }
+
+  struct proc *p = myproc();
+  if (p -> tracing)
+        printf(" [%d] sys_exec(\"%s\", %p)\n", p -> pid, path, uargv);
+
   memset(argv, 0, sizeof(argv));
   for(i=0;; i++){
     if(i >= NELEM(argv)){
@@ -443,7 +509,7 @@ sys_exec(void)
 
   for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
     kfree(argv[i]);
-
+    
   return ret;
 
  bad:
@@ -458,10 +524,14 @@ sys_pipe(void)
   uint64 fdarray; // user pointer to array of two integers
   struct file *rf, *wf;
   int fd0, fd1;
-  struct proc *p = myproc();
 
   if(argaddr(0, &fdarray) < 0)
     return -1;
+
+  struct proc *p = myproc();
+  if (p -> tracing)
+  	printf(" [%d] sys_pipe(%p)\n", p -> pid, fdarray);
+
   if(pipealloc(&rf, &wf) < 0)
     return -1;
   fd0 = -1;
@@ -483,3 +553,34 @@ sys_pipe(void)
   return 0;
 }
 
+uint64
+sys_suspend(void)
+{
+	int pid, fd;
+	struct file *f;
+
+	if(argint(0, &pid) < 0)
+		return -1;
+
+	if(argfd(1, &fd, &f) < 0)
+		return -1;
+	
+	if(suspend(pid, f) < 0)
+		return -1;
+
+	return 1;
+}
+
+uint64
+sys_resume(void)
+{
+	char filename[MAXPATH]/* = { 0 }*/;
+
+	if(argstr(0, filename, MAXPATH) < 0)
+		return -1;
+
+	if(resume(filename) < 0)
+		return -1;
+
+	return 1;
+}

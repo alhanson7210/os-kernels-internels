@@ -67,7 +67,7 @@ OBJS = \
 
 # riscv64-unknown-elf- or riscv64-linux-gnu-
 # perhaps in /opt/riscv/bin
-#TOOLPREFIX =
+TOOLPREFIX = /usr/local/opt/riscv-gnu-toolchain/bin/riscv64-unknown-elf-
 
 # Try to infer the correct TOOLPREFIX if not set
 ifndef TOOLPREFIX
@@ -168,6 +168,23 @@ UPROGS=\
 	$U/_mkdir\
 	$U/_rm\
 	$U/_sh\
+	$U/_hello_xv6\
+	$U/_fork\
+	$U/_forkexec\
+	$U/_strace\
+	$U/_helloworld\
+	$U/_sctest\
+	$U/_ps\
+	$U/_suspend\
+	$U/_resume\
+	$U/_counter\
+	$U/_vctest\
+	$U/_ctool\
+	$U/_df\
+	$U/_free\
+	$U/_membomb\
+	$U/_diskbomb\
+	$U/_forkbomb\
 	$U/_stressfs\
 	$U/_usertests\
 	$U/_wc\
@@ -180,7 +197,7 @@ UPROGS=\
 	$U/_bcachetest\
 	$U/_alloctest\
 	$U/_specialtest\
-	# $U/_symlinktest\
+	#$U/_symlinktest\
 
 fs.img: mkfs/mkfs README user/xargstest.sh $(UPROGS)
 	mkfs/mkfs fs.img README user/xargstest.sh $(UPROGS)
